@@ -1,0 +1,4 @@
+# Known differences from redis-rb: the conformance examples each one fails. They run as pending, so once
+# one passes RSpec fails it and the entry must be removed. Flaky gaps (which only show on some runs, e.g.
+# when a command happens to reach the right cluster node) are skipped instead.
+[]

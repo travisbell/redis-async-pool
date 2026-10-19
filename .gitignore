@@ -1,0 +1,8 @@
+/.bundle/
+/pkg/
+/tmp/
+/coverage/
+Gemfile.lock
+.rspec_status
+/bench/results/*
+!/bench/results/.keep

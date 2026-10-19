@@ -1,0 +1,20 @@
+# Disposable servers for the specs, which flush them: `docker compose up -d`.
+services:
+  redis:
+    image: redis:7.4
+    ports:
+      - "6390:6379"
+
+  # A three-primary cluster, so commands sent to the wrong node get MOVED. Nodes announce 127.0.0.1 so
+  # clients outside Docker can follow the slot map.
+  redis-cluster:
+    image: redis:7.4
+    ports:
+      - "6391-6393:6391-6393"
+    command: >
+      sh -c "for port in 6391 6392 6393; do
+               redis-server --port $$port --cluster-enabled yes --cluster-config-file nodes-$$port.conf --cluster-announce-ip 127.0.0.1 --save '' --appendonly no --daemonize yes;
+             done;
+             until redis-cli -p 6393 ping; do sleep 0.1; done;
+             redis-cli --cluster create 127.0.0.1:6391 127.0.0.1:6392 127.0.0.1:6393 --cluster-yes;
+             sleep infinity"
