@@ -83,6 +83,9 @@ errors. A coverage spec fails if a redis-rb method has no case. They pass with n
 starts failing can be listed in [`spec/conformance/known_gaps.yml`](spec/conformance/known_gaps.yml),
 where it runs as pending until fixed (`CONFORMANCE_GAPS=off` runs those cases normally).
 
+redis-rb's own lint tests (`test/lint/`, vendored from redis-rb) also run against it, with each kind of
+pool: the replies redis-rb's maintainers expect.
+
 Where it differs by design, sharing a client across fibers changes what some state covers:
 `subscribed?` and redis-rb's one-subscription-at-a-time rule apply to the whole client, and a `watch`
 without a block (followed by `multi`) can't know which pooled connection the `multi` will use, so use
@@ -104,6 +107,7 @@ server that has data:
 ```bash
 docker compose up -d   # standalone on 6390, a three-node cluster on 6391-6393
 bundle exec rspec      # POOL=connection_pool runs the conformance specs over connection_pool
+bundle exec rake lint  # redis-rb's lint tests (database 15 of the standalone server); POOL= too
 bundle exec rubocop
 ```
 

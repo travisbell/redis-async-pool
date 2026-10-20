@@ -8,6 +8,8 @@ AllCops:
   Exclude:
     - "vendor/**/*"
     - "tmp/**/*"
+    # Vendored from redis-rb.
+    - "test/lint/**/*"
 
 Layout/LineLength:
   Max: 200
