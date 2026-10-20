@@ -35,6 +35,24 @@ RSpec.describe(Redis::Async::Pool::Connections) do
     end
   end
 
+  it "only times checkouts that wait for a connection" do
+    Sync do |task|
+      pool.with { nil }
+
+      expect(task).not_to(receive(:with_timeout))
+      pool.with { nil }
+    end
+  end
+
+  # async-pool's gardener would close the pool as each checkout's reactor finished.
+  it "keeps its connections outside a reactor, where each checkout runs in a reactor of its own" do
+    first = pool.with { |client| client.call("PING") && client }
+    second = pool.with { |client| client }
+
+    expect(second).to(equal(first))
+    expect(second).to(be_connected)
+  end
+
   it "tags the pool with the server's URL" do
     expect(pool.controller.tags).to(include(endpoint: config.server_url))
   end

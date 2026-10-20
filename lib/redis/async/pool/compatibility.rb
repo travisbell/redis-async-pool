@@ -9,7 +9,7 @@ class Redis
         # What the clients override in redis-rb's Redis.
         REDIS_PRIVATE_METHODS = [:initialize_client, :synchronize, :send_command, :send_blocking_command].freeze
         # What the pools use of async-pool.
-        CONTROLLER_METHODS = [:acquire, :release, :close].freeze
+        CONTROLLER_METHODS = [:acquire, :available?, :release, :close].freeze
 
         class << self
           def check!
@@ -51,6 +51,8 @@ class Redis
             CONTROLLER_METHODS.each do |method|
               missing << "Async::Pool::Controller##{method}" unless ::Async::Pool::Controller.method_defined?(method)
             end
+            # Connections::Controller overrides it to leave the gardener out.
+            missing << "Async::Pool::Controller#start_gardener" unless ::Async::Pool::Controller.protected_method_defined?(:start_gardener)
 
             return if missing.empty?
 

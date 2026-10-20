@@ -9,6 +9,16 @@ class Redis
       #
       # Fibers only: async-pool isn't thread-safe. Outside a reactor, each checkout runs in one of its own.
       class Connections
+        # async-pool's controller without its gardener. With no policy (none is set here), the gardener's task
+        # only wakes on every release, a context switch per command. It also closes the pool when the reactor it
+        # started in finishes, so outside a reactor, where each checkout runs in a reactor of its own, every
+        # command would reconnect.
+        class Controller < ::Async::Pool::Controller
+          protected
+
+          def start_gardener; end
+        end
+
         # A pooled redis-client connection.
         class Resource < ::Async::Pool::Resource
           attr_reader :client
@@ -30,7 +40,7 @@ class Redis
         def initialize(size:, server_url:, timeout: 5, tags: nil, &factory)
           @size = size
           @timeout = timeout
-          @controller = ::Async::Pool::Controller.wrap(limit: size, tags: { endpoint: server_url }.merge(tags || {})) { Resource.new(factory.call) }
+          @controller = Controller.wrap(limit: size, tags: { endpoint: server_url }.merge(tags || {})) { Resource.new(factory.call) }
           # Thread#[] is per fiber (and, unlike Fiber[], not inherited by the fibers it starts).
           @held_key = :"redis_async_pool_held_#{object_id}"
         end
@@ -43,11 +53,7 @@ class Redis
           return yield(held.client) if held
 
           Sync do |task|
-            resource = begin
-              task.with_timeout(timeout) { @controller.acquire }
-            rescue ::Async::TimeoutError
-              raise ::ConnectionPool::TimeoutError, "Waited #{timeout} sec, 0/#{@size} available"
-            end
+            resource = checkout(task, timeout)
 
             begin
               Thread.current[@held_key] = resource
@@ -61,6 +67,20 @@ class Redis
 
         def shutdown
           @controller.close
+        end
+
+        private
+
+        # Only waiting for a connection is timed, so taking a free one doesn't arm a timer. (Taking one can still
+        # wait for another fiber to finish connecting, which its connect timeout bounds.)
+        def checkout(task, timeout)
+          return @controller.acquire if @controller.available?
+
+          begin
+            task.with_timeout(timeout) { @controller.acquire }
+          rescue ::Async::TimeoutError
+            raise ::ConnectionPool::TimeoutError, "Waited #{timeout} sec, 0/#{@size} available"
+          end
         end
       end
 

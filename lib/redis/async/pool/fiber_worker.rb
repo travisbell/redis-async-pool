@@ -7,16 +7,27 @@ class Redis
       # to every node, ...) in a fiber of its own on the current reactor, rather than in a thread (its :on_demand
       # and :pooled models) or one after another (:none, the default). Outside a reactor, tasks run inline.
       class FiberWorker
-        def new_group(size:)
-          ::RedisClient::Cluster::ConcurrentWorker::Group.new(worker: self, queue: ::Thread::Queue.new, size: size)
+        # Runs a group's tasks in fibers of their own, except its last (or only) one, which runs in the calling
+        # fiber: the others are already under way by then, so it saves starting a task without losing any
+        # concurrency.
+        class Tasks
+          def initialize(size)
+            @remaining = size
+          end
+
+          def push(task)
+            @remaining -= 1
+
+            if @remaining.positive? && (current = ::Async::Task.current?)
+              current.async { task.exec }
+            else
+              task.exec
+            end
+          end
         end
 
-        def push(task)
-          if (current = ::Async::Task.current?)
-            current.async { task.exec }
-          else
-            task.exec
-          end
+        def new_group(size:)
+          ::RedisClient::Cluster::ConcurrentWorker::Group.new(worker: Tasks.new(size), queue: ::Thread::Queue.new, size: size)
         end
 
         def close; end
