@@ -15,4 +15,6 @@
   connection. About 15% less CPU per command.
 - `FiberWorker` runs a group's last (or only) task in the calling fiber: 13–15% less CPU per cluster pipeline.
 - `Redis::Async::Pool::Compatibility`: refuses to load against dependencies without the internals it builds on.
+- Requires redis-rb 6 and redis-clustering 6, and speaks RESP3 unless given `protocol: 2`. Unlike redis-rb, it
+  doesn't fall back to RESP2 by itself when a server rejects `HELLO 3` (Redis < 6).
 - Conformance specs comparing it with redis-rb, a coverage spec, concurrency specs and a benchmark.

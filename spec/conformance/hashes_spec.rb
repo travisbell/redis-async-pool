@@ -38,4 +38,12 @@ RSpec.describe("Hashes") do
     # covers: method_missing
     [r.hset("h", "a", "abc"), r.hstrlen("h", "a")]
   end
+
+  conform "hexpire, hpexpire, httl and hpttl" do |r|
+    [
+      r.hset("h", "a", "1", "b", "2"), r.httl("h", "a"), r.hexpire("h", 100, "a", "z"), r.httl("h", "a", "b", "z"),
+      r.hpexpire("h", 200_000, "b"), r.hpexpire("h", 1, "b", nx: true), r.httl("h", "b"),
+      r.hpttl("h", "a", "b").map(&:positive?), r.hpttl("h", "z"), r.httl("missing", "a")
+    ]
+  end
 end

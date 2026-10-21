@@ -23,9 +23,14 @@ class Redis
 
         private
 
-        # The config's #new_pool would drop pool options other than size: and timeout: (e.g. async:).
+        # The config's #new_pool would drop pool options other than size: and timeout: (e.g. async:). Otherwise
+        # it's redis-clustering's: RESP3 unless options say otherwise, which redis-rb 6's replies depend on.
         def initialize_client(options)
-          config = ::RedisClient.cluster(**options, protocol: 2, client_implementation: ::Redis::Cluster::Client)
+          config = ::RedisClient.cluster(
+            protocol: 3, **options,
+            driver_info: ::Redis::LibIdentity.driver_info(options[:driver_info]),
+            client_implementation: ::Redis::Cluster::Client
+          )
           config.new_client(pool: @pool_options)
         end
 

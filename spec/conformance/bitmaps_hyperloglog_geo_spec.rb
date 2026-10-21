@@ -46,4 +46,15 @@ RSpec.describe("Geo") do
       r.georadiusbymember("g", "Palermo", 200, "km"), r.georadiusbymember("g", "Palermo", 200, "km", "WITHDIST", sort: "asc", count: 1)
     ]
   end
+
+  conform "geosearch and geosearchstore" do |r|
+    [
+      r.geoadd("{g}a", *places),
+      r.geosearch("{g}a", fromlonlat: [15, 37], byradius: [200, "km"], sort: "asc"),
+      r.geosearch("{g}a", frommember: "Palermo", bybox: [400, 400, "km"], withcoord: true, withdist: true, sort: "asc"),
+      r.geosearch("{g}a", fromlonlat: [15, 37], byradius: [200, "km"], count: 1, sort: "desc"),
+      r.geosearchstore("{g}b", "{g}a", fromlonlat: [15, 37], byradius: [200, "km"]), r.zrange("{g}b", 0, -1),
+      r.geosearchstore("{g}c", "{g}a", frommember: "Palermo", byradius: [200, "km"], storedist: true), r.zrange("{g}c", 0, -1)
+    ]
+  end
 end

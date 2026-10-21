@@ -31,8 +31,8 @@ Gem::Specification.new do |spec|
   spec.add_dependency("async-pool", ">= 0.12")
   spec.add_dependency("connection_pool", ">= 2.2")
   # The adapter builds on these gems' internals (see Redis::Async::Pool::Compatibility).
-  spec.add_dependency("redis", ">= 5.4")
-  spec.add_dependency("redis-client", ">= 0.31")
-  spec.add_dependency("redis-cluster-client", ">= 0.17")
-  spec.add_dependency("redis-clustering", ">= 5.4")
+  spec.add_dependency("redis", ">= 6")
+  spec.add_dependency("redis-client")
+  spec.add_dependency("redis-cluster-client")
+  spec.add_dependency("redis-clustering", ">= 6")
 end
