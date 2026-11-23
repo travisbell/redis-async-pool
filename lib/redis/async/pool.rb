@@ -21,8 +21,9 @@ class Redis
 
       # The pool: option's defaults: 5 connections (per node, on a cluster), a checkout waiting at most 5 seconds,
       # and async-pool's pools (async: false uses connection_pool's, for threads). tags: label async-pool's pools,
-      # e.g. for metrics, alongside the server's URL.
-      DEFAULT_POOL = { size: 5, timeout: 5, async: true }.freeze
+      # e.g. for metrics, alongside the server's URL. With async-pool's pools, single commands that find every
+      # connection busy go out together in pipelines (auto_pipeline: false sends each over a connection of its own).
+      DEFAULT_POOL = { size: 5, timeout: 5, async: true, auto_pipeline: true }.freeze
 
       class << self
         def pool_options(options)

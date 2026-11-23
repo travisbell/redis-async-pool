@@ -13,7 +13,8 @@ redis-async-pool's clients are redis-rb's own `Redis` and `Redis::Cluster`, with
 over connection pools that every fiber shares: one pool on a standalone server, one per node on a
 cluster. They're [async-pool](https://github.com/socketry/async-pool)'s pools (or connection_pool's, for
 threads), and on a cluster, commands that reach several nodes (pipelines, `mget`, `mset`, `del`,
-commands sent to every node) run in a fiber per node.
+commands sent to every node) run in a fiber per node. When every connection is busy, the commands of the
+fibers waiting for one go out together, in one pipeline per connection (auto-pipelining).
 
 Every method, reply transformation, pipeline, future, transaction, subscription and error is redis-rb's
 (and redis-cluster-client's) own code, so code written for redis-rb runs unchanged.
@@ -47,6 +48,7 @@ end
 | `size:` | 5 | Connections (per node, on a cluster) |
 | `timeout:` | 5 | Seconds a checkout waits for a free connection before raising `Redis::ConnectionError` |
 | `async:` | `true` | async-pool's pools (fibers only); `false` uses connection_pool's (threads too) |
+| `auto_pipeline:` | `true` | With async-pool's pools, sends the single commands of fibers that find every connection busy in one pipeline |
 | `tags:` | | Labels for async-pool's pools, e.g. for metrics, alongside the server's URL (`endpoint:`) |
 
 On a cluster with an async pool, `concurrency:` defaults to `{ model: :async }`, redis-async-pool's fiber
@@ -60,13 +62,36 @@ same one again; the fibers it starts get their own.
 A checkout that waits longer than `timeout:` raises `Redis::ConnectionError`, with either kind of pool.
 An async pool also works outside a reactor (each checkout runs in one of its own), but isn't thread-safe.
 
+### Auto-pipelining
+
+A single command (anything but `pipelined`, `multi` and a `watch` block's commands) takes a free
+connection if there is one, as it would without auto-pipelining. If every connection is busy, it queues:
+the first fiber to queue waits for a connection, in line with the fibers checking connections out, and
+sends every command queued by then in one pipeline. Each fiber gets its own reply, error or reply block's
+result, so callers can't tell, except that under load the round trips, reads and writes of many commands
+become one. Commands that change or block the connection they run on (`multi`, `watch`, `select`, `auth`,
+`hello`, `client`, `reset`, `wait`, `waitaof`, subscriptions, blocking pops, `xread`, ...) always go
+alone.
+
+What a batched command does differently:
+
+- redis-client middlewares (e.g. instrumentation) see one `call_pipelined` with every fiber's commands,
+  run in the fiber that sends it, rather than a `call` per command in its own fiber.
+- If the connection fails, every command in the pipeline fails with its error (redis-client retries a
+  pipeline as it would a command). The pipeline goes out in a task of its own, so stopping or timing out
+  the fiber that sent it doesn't fail the others; a fiber that stops or times out after its command went
+  out (as with a single command) leaves the command to run, and one that stops while queued just leaves
+  the queue.
+
+`pool: { auto_pipeline: false }` sends every command over a connection of its own.
+
 ## How it works
 
 - `Client` and `ClusterClient` subclass `Redis` and `Redis::Cluster`, replacing their client (one
   redis-client connection, or redis-cluster-client without pools) with a pooled one, and the lock around it.
 - `pool: { async: true }` makes redis-client's `RedisClient::Pooled` (which redis-cluster-client also
   uses for each node) build its pool with `Connections`: async-pool's `Async::Pool::Controller` behind
-  connection_pool's interface.
+  connection_pool's interface, which also auto-pipelines the single commands `RedisClient::Pooled` sends.
 - `concurrency: { model: :async }` makes redis-cluster-client use `FiberWorker`.
 
 Both are hooks prepended to redis-client and redis-cluster-client on load, inert unless a client asks for
@@ -99,11 +124,25 @@ re-prepares a fieldset when `himport_set` finds it missing, so sets work, but `h
 
 ## Performance
 
-[bench/](bench/README.md) compares it with redis-rb in a `ConnectionPool::Wrapper`. On a laptop, with
-Redis in Docker: on a standalone server they're within a few percent; on a three-node cluster,
-redis-async-pool does about 20% more operations per second for 10–20% less CPU per operation under
-concurrency, up to 65% more for `mget` and pipelines across nodes, and removes multi-second p99s that a
-`ConnectionPool::Wrapper` of `Redis::Cluster`s shows with 256 fibers.
+[bench/](bench/README.md) compares it with redis-rb in a `ConnectionPool::Wrapper`. In a Linux container
+next to Redis, with 4 connections (operations per second, and CPU per operation):
+
+| | 1 fiber | 64 fibers | 256 fibers |
+|---|---|---|---|
+| standalone `get` | 47k vs 45k | 270k vs 37k (3.1 vs 27 µs) | 345k vs 13k (2.5 vs 79 µs) |
+| standalone `hgetall` | 37k vs 36k | 108k vs 31k | 127k vs 12k |
+| cluster `get` | 48k vs 46k | 172k vs 31k (5.8 vs 32 µs) | 245k vs 11k |
+| cluster `mget` (10 keys across nodes) | 10.0k vs 7.1k | 11.2k vs 9.0k | 7.6k vs 3.5k |
+| cluster `fanout` (5 fibers' GETs) | 7.6k vs 6.8k | 15.2k vs 4.4k | 14.3k vs 1.7k |
+
+With one fiber it's within noise of redis-rb, and on a cluster its fan-out cuts the latency of commands
+across nodes by about a quarter. Under concurrency, auto-pipelining turns the round trips of many fibers' commands into one,
+and a `ConnectionPool::Wrapper` of `Redis::Cluster`s shows multi-second p99s at 256 fibers that it doesn't.
+
+Every Async task runs in a fiber, and Ruby releases a finished fiber's stack to the OS, so the next
+fiber's stack faults its pages back in. `RUBY_SHARED_FIBER_POOL_FREE_STACKS=0` keeps them, for less CPU
+per fiber (on a cluster, about 18% less per `fanout` and 11% per cross-node pipeline) at the cost of
+keeping the stacks of the most fibers alive at once in memory.
 
 ## Development
 

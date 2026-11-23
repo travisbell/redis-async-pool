@@ -20,3 +20,11 @@
 - `ClusterClient` routes commands as redis-clustering does (e.g. `waitaof` to every primary), with the caller's
   `command_routings:` on top. `dup` takes redis-rb's option overrides, which `keyspace_notifications` relies on.
 - Conformance specs comparing it with redis-rb (on Redis 8.12), a coverage spec, concurrency specs and a benchmark.
+- Auto-pipelining (`pool: { auto_pipeline: true }`, the default with async-pool's pools): single commands that
+  find every connection busy go out together, one pipeline per connection, each fiber getting its own reply. In a
+  Linux container with 4 connections and 64–256 fibers, 3–30× the operations per second of redis-rb in a
+  `ConnectionPool::Wrapper`, at 2–9 µs of CPU per command.
+- A checkout no longer takes a timeout around the caller's code (e.g. `task.with_timeout`) for its own, which
+  raised `Redis::ConnectionError` instead of the caller's `Async::TimeoutError`, and doesn't time taking a
+  connection the pool has room to open.
+- Three fewer allocations per command (`Connections::Controller#available?`).

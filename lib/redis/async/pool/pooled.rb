@@ -16,6 +16,11 @@ class Redis
           super
         end
 
+        def call_v(...)
+          @connected = true
+          super
+        end
+
         def close
           @connected = false
           super

@@ -44,6 +44,19 @@ RSpec.describe(Redis::Async::Pool::Connections) do
     end
   end
 
+  it "leaves a timeout around the caller's checkout to the caller" do
+    Sync do
+      pool.with do
+        Async do
+          pool.with do
+            waiting = Async { |task| task.with_timeout(0.05) { pool.with { nil } } }
+            expect { waiting.wait }.to(raise_error(Async::TimeoutError, "execution expired"))
+          end
+        end.wait
+      end
+    end
+  end
+
   # async-pool's gardener would close the pool as each checkout's reactor finished.
   it "keeps its connections outside a reactor, where each checkout runs in a reactor of its own" do
     first = pool.with { |client| client.call("PING") && client }

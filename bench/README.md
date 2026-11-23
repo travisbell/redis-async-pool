@@ -49,5 +49,7 @@ percentiles, errors and the process's CPU time per operation.
 - Percentiles come from completed operations, so a fiber that waits the whole run for a connection adds
   no samples.
 - The load runs in the same process and reactor as the client, so CPU per operation includes it equally.
-- On a laptop, Redis (in Docker) is much closer than in production, which `remote` compensates for.
+- On a laptop, Redis (in Docker) is much closer than in production, which `remote` compensates for. Docker
+  Desktop's port forwarding on macOS also stalls large bursts of replies (e.g. auto-pipelined ones) for
+  ~15ms, so run the benchmark in a Linux container on Redis's Docker network for numbers like production's.
 - YJIT is on.

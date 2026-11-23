@@ -128,4 +128,201 @@ RSpec.describe("Clients shared across fibers") do
       end
     end
   end
+
+  describe "auto-pipelining" do
+    # The commands each pipeline and each single call sent, by name, as redis-client's middlewares see them.
+    let(:sent) { { pipelines: [], calls: [] } }
+    let(:recorder) do
+      sent = self.sent
+      Module.new do
+        define_method(:call) do |command, config, &block|
+          sent[:calls] << command.first.downcase
+          super(command, config, &block)
+        end
+
+        define_method(:call_pipelined) do |commands, config, &block|
+          names = commands.map { |command| command.first.downcase }
+          sent[:pipelines] << names unless names.include?("hello")
+          super(commands, config, &block)
+        end
+      end
+    end
+
+    def client(**pool)
+      @client = Redis::Async::Pool::Client.new(url: Conformance::URLS[:standalone], middlewares: [recorder], pool: { size: 1, timeout: 5 }.merge(pool))
+    end
+
+    before { Conformance.reset!(:standalone) }
+
+    after do
+      @client&.close
+      Conformance.servers(:standalone).each(&:flushall)
+    end
+
+    it "sends the commands of fibers that find every connection busy in one pipeline" do
+      redis = client
+      results = Sync do
+        barrier = Async::Barrier.new
+        tasks = Array.new(20) { |i| barrier.async { redis.set("k#{i}", i.to_s) && redis.get("k#{i}") } }
+        barrier.wait
+        tasks.map(&:wait)
+      end
+
+      expect(results).to(eq(Array.new(20) { |i| i.to_s }))
+      expect(sent[:pipelines].map(&:size).max).to(be >= 10)
+    end
+
+    it "raises each error, and calls each reply block, in its own fiber" do
+      redis = client
+      Sync { redis.set("s", "text") }
+
+      outcome = lambda do |redis, i|
+        case i % 3
+        when 0 then redis.incr("s")
+        when 1 then redis.exists?("s")
+        else redis.sismember("s", "a")
+        end
+      rescue Redis::CommandError => error
+        [error.class, error.message]
+      end
+
+      results = Sync do
+        barrier = Async::Barrier.new
+        tasks = Array.new(30) { |i| barrier.async { outcome.call(redis, i) } }
+        barrier.wait
+        tasks.map(&:wait)
+      end
+      reference = Redis.new(url: Conformance::URLS[:standalone])
+
+      expect(results).to(eq(Array.new(30) { |i| outcome.call(reference, i) }))
+      expect(results.map(&:class).uniq).to(contain_exactly(Array, TrueClass))
+      expect(sent[:pipelines]).to(include(satisfy { |names| names.size > 1 }))
+    ensure
+      reference&.close
+    end
+
+    it "sends commands that change or block their connection on their own" do
+      redis = client
+      Sync do
+        barrier = Async::Barrier.new
+        10.times { barrier.async { redis.call("CLIENT", "ID") } }
+        10.times { barrier.async { redis.select(0) } }
+        barrier.wait
+      end
+
+      expect(sent[:pipelines].flatten & ["client", "select"]).to(be_empty)
+      expect(sent[:calls].count("client")).to(eq(10))
+    end
+
+    it "raises an invalid argument in its own fiber, as a single command would" do
+      redis = client
+      results = Sync do
+        holder = Async { redis._client.with { sleep(0.02) } }
+        sleep(0.01)
+        tasks = [Async { redis.set("a", "1") }, Async { redis.get(nil) rescue $! }, Async { redis.get("a") }]
+        holder.wait
+        tasks.map(&:wait)
+      end
+
+      expect(results[0]).to(eq("OK"))
+      expect(results[1]).to(be_a(TypeError))
+      expect(results[2]).to(eq("1"))
+    end
+
+    it "doesn't wake a fiber that was stopped after its reply arrived from what it waits for next" do
+      redis = client
+      slept = nil
+      Sync do
+        holder = Async { redis._client.with { sleep(0.02) } }
+        sleep(0.01)
+        stopped = nil
+        stopper = Async do
+          redis.get("a")
+          stopped.stop
+        end
+        stopped = Async do
+          redis.get("b")
+          sleep(1)
+        ensure
+          started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          sleep(0.2)
+          slept = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        end
+        holder.wait
+        [stopper, stopped].each(&:wait)
+      end
+
+      expect(slept).to(be >= 0.2)
+    end
+
+    it "sends each command over a connection of its own with auto_pipeline: false" do
+      redis = client(auto_pipeline: false)
+      Sync do
+        barrier = Async::Barrier.new
+        20.times { |i| barrier.async { redis.get("k#{i}") } }
+        barrier.wait
+      end
+
+      expect(sent[:pipelines]).to(be_empty)
+      expect(sent[:calls].count("get")).to(eq(20))
+    end
+
+    it "lets the others go on when a waiting fiber, or the one that would send their pipeline, is stopped" do
+      redis = client
+      results = Sync do
+        holder = Async { redis.blpop("never", timeout: 0.2) }
+        sleep(0.01)
+        leader = Async { redis.get("a") }
+        follower = Async { redis.get("b") }
+        stopped = Async { redis.get("c") }
+        others = Array.new(3) { |i| Async { redis.get("d#{i}") } }
+        sleep(0.01)
+        leader.stop
+        stopped.stop
+        holder.wait
+        [follower.wait, *others.map(&:wait), redis.set("e", "1"), redis.get("e")]
+      end
+
+      expect(results).to(eq([nil, nil, nil, nil, "OK", "1"]))
+    end
+
+    it "times out the fibers waiting for a connection when none frees up, each after the pool's timeout" do
+      redis = client(timeout: 0.2)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      errors = Sync do
+        Async { redis.blpop("never", timeout: 1) }
+        sleep(0.01)
+        Array.new(5) { Async { redis.get("k") rescue $! } }.map(&:wait)
+      end
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      expect(errors).to(all(be_a(Redis::ConnectionError).and(have_attributes(message: /Couldn't checkout a connection in time/))))
+      expect(elapsed).to(be < 1.5)
+    end
+
+    it "doesn't fail the others' commands when the fiber that sent their pipeline is stopped or times out" do
+      redis = client
+      # A script that keeps the server busy for a few tenths of a second, so its pipeline still awaits replies.
+      busy = "for i = 1, 200000000 do end return 1"
+
+      [:timeout, :stop].each do |interruption|
+        results = Sync do |task|
+          holder = Async { redis._client.with { sleep(0.02) } }
+          sleep(0.01)
+          leader = Async { interruption == :timeout ? task.with_timeout(0.1) { redis.get("a") } : redis.get("a") }
+          follower = Async { redis.eval(busy) }
+          holder.wait
+          if interruption == :stop
+            sleep(0.05)
+            leader.stop
+          end
+          [(leader.wait rescue $!), follower.wait]
+        end
+
+        expect(results[0]).to(interruption == :timeout ? be_a(Async::TimeoutError) : be_nil)
+        expect(results[1]).to(eq(1))
+      end
+      expect(Sync { redis.set("k", "v") }).to(eq("OK"))
+    end
+  end
 end

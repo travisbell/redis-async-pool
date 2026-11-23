@@ -28,13 +28,25 @@ class Redis
             missing << "Redis::Cluster::DEFAULT_COMMAND_ROUTINGS" unless ::Redis::Cluster.const_defined?(:DEFAULT_COMMAND_ROUTINGS, false)
             missing << "RedisClient::ClusterConfig.new(command_routings:)" unless keywords?(::RedisClient::ClusterConfig.instance_method(:initialize), :command_routings)
 
-            # AsyncPooled replaces how RedisClient::Pooled builds its pool from its options and config.
+            # AsyncPooled replaces how RedisClient::Pooled builds its pool from its options and config, and sends single
+            # commands through it (as RedisClient::Pooled#with would set up the connection) when it's a Connections.
             missing << "RedisClient::Pooled#new_pool" unless ::RedisClient::Pooled.private_method_defined?(:new_pool)
-            missing << "RedisClient::Pooled#with" unless ::RedisClient::Pooled.method_defined?(:with)
+            missing << "RedisClient::Pooled#pool" unless ::RedisClient::Pooled.private_method_defined?(:pool)
+            [:with, :call_v, :connect_timeout, :read_timeout, :write_timeout].each do |method|
+              missing << "RedisClient::Pooled##{method}" unless ::RedisClient::Pooled.method_defined?(method)
+            end
             pooled = ::RedisClient::Pooled.new(::RedisClient.config, size: 1)
             [:@pool_kwargs, :@config].each do |variable|
               missing << "RedisClient::Pooled #{variable}" unless pooled.instance_variable_defined?(variable)
             end
+
+            # Connections sends commands that found every connection busy in pipelines, whose replies it hands out.
+            missing << "RedisClient#pipelined(exception:)" unless keywords?(::RedisClient.instance_method(:pipelined), :exception)
+            missing << "RedisClient::Error#_set_next_error" unless ::RedisClient::Error.method_defined?(:_set_next_error)
+            [:push, :transfer].each do |method|
+              missing << "Async::Scheduler##{method}" unless ::Async::Scheduler.method_defined?(method)
+            end
+            missing << "Async::Task#run" unless ::Async::Task.method_defined?(:run)
 
             # ClusterClient passes pool: and concurrency: through the config to RedisClient::Cluster.
             missing << "RedisClient::ClusterConfig#new_client" unless ::RedisClient::ClusterConfig.method_defined?(:new_client)
@@ -57,8 +69,10 @@ class Redis
             CONTROLLER_METHODS.each do |method|
               missing << "Async::Pool::Controller##{method}" unless ::Async::Pool::Controller.method_defined?(method)
             end
-            # Connections::Controller overrides it to leave the gardener out.
+            # Connections::Controller overrides it to leave the gardener out, and answers #available? from its set.
             missing << "Async::Pool::Controller#start_gardener" unless ::Async::Pool::Controller.protected_method_defined?(:start_gardener)
+            available = ::Async::Pool::Controller.new(-> {}).instance_variable_get(:@available)
+            missing << "Async::Pool::Controller @available" unless available.respond_to?(:empty?)
 
             return if missing.empty?
 
