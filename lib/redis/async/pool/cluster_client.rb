@@ -17,17 +17,20 @@ class Redis
           super(options)
         end
 
-        def dup
-          self.class.new(@options.merge(pool: @pool_options))
+        def dup(**option_overrides)
+          super(pool: @pool_options, **option_overrides)
         end
 
         private
 
         # The config's #new_pool would drop pool options other than size: and timeout: (e.g. async:). Otherwise
-        # it's redis-clustering's: RESP3 unless options say otherwise, which redis-rb 6's replies depend on.
+        # it's redis-clustering's: RESP3 unless options say otherwise, which redis-rb 6's replies depend on, and
+        # its command routings (e.g. WAITAOF to every primary) under the caller's.
         def initialize_client(options)
+          command_routings = DEFAULT_COMMAND_ROUTINGS.merge((options[:command_routings] || {}).transform_keys(&:to_s))
           config = ::RedisClient.cluster(
             protocol: 3, **options,
+            command_routings: command_routings,
             driver_info: ::Redis::LibIdentity.driver_info(options[:driver_info]),
             client_implementation: ::Redis::Cluster::Client
           )

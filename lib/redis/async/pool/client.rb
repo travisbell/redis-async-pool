@@ -30,8 +30,8 @@ class Redis
           end
         end
 
-        def dup
-          self.class.new(@options.merge(pool: @pool_options))
+        def dup(**option_overrides)
+          super(pool: @pool_options, **option_overrides)
         end
 
         private

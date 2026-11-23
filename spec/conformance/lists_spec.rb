@@ -48,4 +48,27 @@ RSpec.describe("Lists") do
       r.lrange("{l}b", 0, -1)
     ]
   end
+
+  conform "lmovem" do |r|
+    [
+      r.rpush("{l}a", ["1", "2", "3", "4", "5", "6", "7"]), r.lmovem("{l}a", "{l}b", "LEFT", "RIGHT"),
+      r.lmovem("{l}a", "{l}b", :left, :left, count: 2, order: "OBO"), r.lmovem("{l}a", "{l}b", "RIGHT", "LEFT", count: 2, order: :bulk),
+      r.lmovem("{l}a", "{l}b", "LEFT", "RIGHT", exactly: 5, order: "BULK"), r.lmovem("{l}a", "{l}b", "LEFT", "RIGHT", exactly: 2, order: "OBO"),
+      r.lmovem("{l}a", "{l}b", "LEFT", "RIGHT", count: 10, order: "BULK"), r.lmovem("{l}missing", "{l}b", "LEFT", "LEFT"),
+      r.lrange("{l}b", 0, -1)
+    ]
+  end
+
+  conform "lmovem with count and exactly", raises: true do |r|
+    r.lmovem("{l}a", "{l}b", "LEFT", "RIGHT", count: 1, exactly: 1, order: "OBO")
+  end
+
+  conform "blmovem" do |r|
+    [
+      r.rpush("{l}a", ["1", "2", "3", "4"]), r.blmovem("{l}a", "{l}b", "LEFT", "RIGHT", timeout: 0.1),
+      r.blmovem("{l}a", "{l}b", "RIGHT", "LEFT", timeout: 0.1, count: 5, order: "OBO"), r.blmovem("{l}a", "{l}b", "LEFT", "LEFT", timeout: 0.1),
+      r.blmovem("{l}b", "{l}a", "LEFT", "RIGHT", timeout: 0.1, exactly: 5, order: "BULK"),
+      r.blmovem("{l}b", "{l}a", "LEFT", "RIGHT", timeout: 0.1, exactly: 2, order: "BULK"), r.lrange("{l}a", 0, -1), r.lrange("{l}b", 0, -1)
+    ]
+  end
 end

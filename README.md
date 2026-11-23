@@ -91,6 +91,12 @@ Where it differs by design, sharing a client across fibers changes what some sta
 without a block (followed by `multi`) can't know which pooled connection the `multi` will use, so use
 the block form.
 
+Server state that belongs to a connection covers whichever pooled connection a command runs on, which
+isn't always the one the fiber's previous command used (it is when the pool isn't busy): `wait` and `waitaof` count
+only that connection's writes, and an HIMPORT fieldset exists only on the connection that prepared it. redis-rb
+re-prepares a fieldset when `himport_set` finds it missing, so sets work, but `himport_discard` and
+`himport_discard_all` only discard it on the connection they run on.
+
 ## Performance
 
 [bench/](bench/README.md) compares it with redis-rb in a `ConnectionPool::Wrapper`. On a laptop, with

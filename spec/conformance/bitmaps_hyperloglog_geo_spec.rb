@@ -13,6 +13,14 @@ RSpec.describe("Bitmaps") do
     [r.set("{b}a", "\xF0"), r.set("{b}b", "\x0F"), r.bitop("or", "{b}d", "{b}a", "{b}b"), r.get("{b}d"), r.bitop(:not, "{b}n", "{b}a"), r.get("{b}n")]
   end
 
+  conform "bitrangeintarray" do |r|
+    [
+      r.setbit("b", 1, 1), r.setbit("b", 7, 1), r.setbit("b", 9, 1), r.setbit("b", 30, 1),
+      r.bitrangeintarray("b", 0, -1), r.bitrangeintarray("b", 24, 31, scale: :bit, zeros: true, limit: 2),
+      r.bitrangeintarray("b", 0, 0, scale: "byte", limit: 1), r.bitrangeintarray("b", 1, 1, zeros: true), r.bitrangeintarray("missing", 0, -1)
+    ]
+  end
+
   conform "bitop across slots" do |r|
     [r.set("a", "\xF0"), r.set("b", "\x0F"), r.bitop("and", "d", "a", "b")]
   end

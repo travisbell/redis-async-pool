@@ -13,6 +13,74 @@ RSpec.describe("Server") do
     [info.class, info.key?("redis_version"), r.info("server")["redis_version"], r.info(:keyspace), commandstats.class, commandstats.values.first&.keys&.sort]
   end
 
+  conform "info with several sections", modes: [:direct] do |r|
+    several = r.info("server", "clients")
+    listed = r.info(["memory", :keyspace])
+    [several.class, several.key?("redis_version"), several.key?("connected_clients"), several.key?("used_memory"), listed.key?("used_memory"), r.info(:everything).key?("cmdstat_info")]
+  end
+
+  # With appendonly off (as on the specs' servers) WAITAOF can only wait for no local fsync.
+  conform "waitaof" do |r|
+    [r.set("k", "v"), r.waitaof(0, 0, 0), r.waitaof(0, 0, 100)]
+  end
+
+  conform "waitaof with appendonly off", targets: [:standalone], raises: true do |r|
+    r.waitaof(1, 0, 0)
+  end
+
+  # HOTKEYS tracks a server-wide session that survives the harness's flush, so each case first ends any left over.
+  conform "hotkeys", targets: [:standalone] do |r|
+    Conformance.side.then { |side| [side.hotkeys_stop, side.hotkeys_reset] }
+    [
+      r.hotkeys_get, r.hotkeys_stop, r.hotkeys_start(metrics: [:cpu, :net], count: 5, sample: 1), r.hotkeys_stop, r.hotkeys_stop,
+      r.hotkeys_reset, r.hotkeys_get, r.hotkeys_start(metrics: "net", duration: 60), r.hotkeys_stop, r.hotkeys_reset
+    ]
+  end
+
+  # A session's counters and timings differ between runs (a key whose commands took under 1µs of CPU isn't
+  # listed by CPU time), so only the shape, the hottest keys by bytes and the keys listed by CPU are compared.
+  conform "hotkeys_get of a session", targets: [:standalone], modes: [:direct] do |r|
+    Conformance.side.then { |side| [side.hotkeys_stop, side.hotkeys_reset] }
+    r.hotkeys_start(metrics: [:cpu, :net], count: 2)
+    r.set("hot", "x" * 1000)
+    3.times { r.get("hot") }
+    r.set("cold", "x")
+    active = r.hotkeys_get
+    stopped = [r.hotkeys_stop, r.hotkeys_get]
+    [
+      active.keys.sort, active.values_at("tracking-active", "sample-ratio", "selected-slots"), active["by-net-bytes"].map(&:first),
+      (active["by-cpu-time-us"].map(&:first) - ["hot", "cold"]), stopped[0], stopped[1]["tracking-active"], r.hotkeys_reset
+    ]
+  end
+
+  conform "hotkeys_start during a session", targets: [:standalone], raises: true do |r|
+    Conformance.side.then { |side| [side.hotkeys_stop, side.hotkeys_reset] }
+    [r.hotkeys_start(metrics: :cpu), r.hotkeys_start(metrics: :net)]
+  end
+
+  conform "hotkeys_reset during a session", targets: [:standalone], raises: true do |r|
+    Conformance.side.then { |side| [side.hotkeys_stop, side.hotkeys_reset] }
+    [r.hotkeys_start(metrics: :cpu), r.hotkeys_reset]
+  end
+
+  conform "hotkeys_start with slots on a standalone server", targets: [:standalone], raises: true do |r|
+    Conformance.side.then { |side| [side.hotkeys_stop, side.hotkeys_reset] }
+    r.hotkeys_start(metrics: :cpu, slots: [0])
+  end
+
+  # Redis::Cluster raises NotImplementedError for the HOTKEYS family, since the session is a single node's.
+  conform "hotkeys on a cluster", targets: [:cluster], modes: [:direct] do |r|
+    [-> { r.hotkeys_start(metrics: :cpu) }, -> { r.hotkeys_get }, -> { r.hotkeys_stop }, -> { r.hotkeys_reset }].map do |command|
+      command.call
+    rescue NotImplementedError => error
+      [error.class, error.message]
+    end
+  end
+
+  conform "hotkeys in a cluster pipeline or transaction", targets: [:cluster], modes: [:pipelined, :multi] do |r|
+    [r.set("k", "v"), r.hotkeys_get]
+  end
+
   conform "time and lastsave", modes: [:direct] do |r|
     [r.time.map(&:class), r.lastsave.class]
   end
@@ -106,6 +174,18 @@ RSpec.describe("Cluster") do
     ]
   end
 
+  # Every primary reports its own slots, in an order that differs between runs; their CPU and network counters
+  # differ too.
+  conform "cluster slot-stats", targets: [:cluster], modes: [:direct] do |r|
+    ["a", "b", "{a}c"].each { |key| r.set(key, "1") }
+    all = r.cluster("slot-stats", "SLOTSRANGE", 0, 16_383)
+    top = r.cluster("slot-stats", "ORDERBY", "key-count", "LIMIT", 1)
+    [
+      all.size, all.first.last.keys.sort, all.select { |_slot, stats| stats["key-count"].positive? }.sort.map { |slot, stats| [slot, stats["key-count"]] },
+      top.map { |slot, stats| [slot, stats["key-count"]] }.sort, r.cluster(:"slot-stats", "SLOTSRANGE", 0, 0).map(&:first)
+    ]
+  end
+
   conform "cluster on a standalone server", targets: [:standalone], raises: true do |r|
     r.cluster(:info)
   end
@@ -129,5 +209,24 @@ RSpec.describe("Cluster pipelines") do
 
   conform "keys on several nodes, in order per node", targets: [:cluster], modes: [:pipelined] do |r|
     [r.set("a", "1"), r.set("b", "1"), r.incr("a"), r.incr("b"), r.get("a"), r.get("b"), r.del("a"), r.exists?("a")]
+  end
+end
+
+RSpec.describe("Keyspace notifications") do
+  # The manager listens on its own connections (one per cluster node) and threads, so this runs directly.
+  conform "keyspace_notifications", modes: [:direct] do |r|
+    servers = Conformance.servers(r.is_a?(Redis::Cluster) ? :cluster : :standalone)
+    servers.each { |server| server.config(:set, "notify-keyspace-events", "KEA") }
+    received = Queue.new
+    manager = r.keyspace_notifications
+    manager.subscribe_keyevent("set") { |notification| received << notification }
+    manager.subscribe_keyspace("{k}*") { |notification| received << notification }
+    r.set("{k}a", "1")
+    r.del("{k}a")
+    notifications = Array.new(3) { received.pop(timeout: 2) }
+    [notifications.map { |notification| notification && [notification.family, notification.key, notification.event] }.sort, manager.subscribed?]
+  ensure
+    manager&.close
+    servers&.each { |server| server.config(:set, "notify-keyspace-events", "") }
   end
 end

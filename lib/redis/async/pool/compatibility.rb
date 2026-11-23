@@ -21,8 +21,12 @@ class Redis
 
             missing << "Redis::Client.translate_error!" unless ::Redis::Client.respond_to?(:translate_error!)
             missing << "Redis::Cluster::Client.translate_error!" unless ::Redis::Cluster::Client.respond_to?(:translate_error!)
-            # ClusterClient identifies itself to the server as redis-clustering does.
+            # The clients' #dup adds pool: to redis-rb's overrides.
+            missing << "Redis#dup(**option_overrides)" unless ::Redis.instance_method(:dup).parameters.any? { |kind, _| kind == :keyrest }
+            # ClusterClient identifies itself to the server and routes commands as redis-clustering does.
             missing << "Redis::LibIdentity.driver_info" unless defined?(::Redis::LibIdentity) && ::Redis::LibIdentity.respond_to?(:driver_info)
+            missing << "Redis::Cluster::DEFAULT_COMMAND_ROUTINGS" unless ::Redis::Cluster.const_defined?(:DEFAULT_COMMAND_ROUTINGS, false)
+            missing << "RedisClient::ClusterConfig.new(command_routings:)" unless keywords?(::RedisClient::ClusterConfig.instance_method(:initialize), :command_routings)
 
             # AsyncPooled replaces how RedisClient::Pooled builds its pool from its options and config.
             missing << "RedisClient::Pooled#new_pool" unless ::RedisClient::Pooled.private_method_defined?(:new_pool)

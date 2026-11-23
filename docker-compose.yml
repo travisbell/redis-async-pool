@@ -1,19 +1,22 @@
 # Disposable servers for the specs, which flush them: `docker compose up -d`.
 services:
   redis:
-    image: redis:7.4
+    image: redis:8.12
     ports:
       - "6390:6379"
 
   # A three-primary cluster, so commands sent to the wrong node get MOVED. Nodes announce 127.0.0.1 so
-  # clients outside Docker can follow the slot map.
+  # clients outside Docker can follow the slot map. Redis 8.12 won't run a cluster bus without TLS unless its
+  # protected mode is off, which is fine for a disposable local cluster. The nodes load the image's modules (JSON,
+  # Query Engine, ...) as its entrypoint does for the standalone server.
   redis-cluster:
-    image: redis:7.4
+    image: redis:8.12
     ports:
       - "6391-6393:6391-6393"
     command: >
-      sh -c "for port in 6391 6392 6393; do
-               redis-server --port $$port --cluster-enabled yes --cluster-config-file nodes-$$port.conf --cluster-announce-ip 127.0.0.1 --save '' --appendonly no --daemonize yes;
+      sh -c "modules=$$(for module in /usr/local/lib/redis/modules/*.so; do printf -- '--loadmodule %s ' $$module; done);
+             for port in 6391 6392 6393; do
+               redis-server --port $$port --cluster-enabled yes --cluster-config-file nodes-$$port.conf --cluster-announce-ip 127.0.0.1 --cluster-bus-port-protected-mode no --save '' --appendonly no --daemonize yes $$modules;
              done;
              until redis-cli -p 6393 ping; do sleep 0.1; done;
              redis-cli --cluster create 127.0.0.1:6391 127.0.0.1:6392 127.0.0.1:6393 --cluster-yes;

@@ -91,4 +91,54 @@ RSpec.describe("Sorted sets") do
     r.zadd("z", [[1, "a"], [2.5, "b"]])
     r.zscan_each("z").to_a
   end
+
+  conform "zmove" do |r|
+    [
+      r.zadd("{z}a", [[1, "a"], [2, "b"], [3, "c"], [4, "d"], [5, "e"], [6, "f"]]), r.zmove("{z}a", "{z}b"),
+      r.zmove("{z}a", "{z}b", modifier: "MAX", count: 2), r.zmove("{z}a", "{z}b", byscore: ["(2", 4]),
+      r.zmove("{z}a", "{z}b", byscore: [10, "+inf"]), r.zmove("{z}missing", "{z}b"), r.zrange("{z}a", 0, -1, with_scores: true),
+      r.zrange("{z}b", 0, -1, with_scores: true)
+    ]
+  end
+
+  conform "zmove with modifier and byscore", raises: true do |r|
+    r.zmove("{z}a", "{z}b", modifier: "MAX", byscore: [1, 2])
+  end
+
+  conform "zmovemember" do |r|
+    [
+      r.zadd("{z}a", [[1, "a"], [2, "b"], [3, "c"], [4, "d"]]), r.zadd("{z}b", 10, "c"), r.zmovemember("{z}a", "{z}b", "a"),
+      r.zmovemember("{z}a", "{z}b", ["b", "z", "b"]), r.zmovemember("{z}a", "{z}b", ["c", "d"], nx: true),
+      r.zmovemember("{z}a", "{z}b", "c", xx: true), r.zmovemember("{z}a", "{z}b", "z"), r.zrange("{z}a", 0, -1, with_scores: true),
+      r.zrange("{z}b", 0, -1, with_scores: true)
+    ]
+  end
+
+  conform "bzmove" do |r|
+    [
+      r.zadd("{z}a", [[1, "a"], [2, "b"], [3, "c"]]), r.bzmove("{z}a", "{z}b", timeout: 0.1), r.bzmove("{z}a", "{z}b", timeout: 0.1, modifier: "MAX", count: 5),
+      r.bzmove("{z}a", "{z}b", timeout: 0.1), r.zrange("{z}b", 0, -1, with_scores: true)
+    ]
+  end
+
+  conform "zintercard" do |r|
+    [
+      r.zadd("{z}a", [[1, "x"], [2, "y"], [3, "z"]]), r.zadd("{z}b", [[1, "y"], [2, "z"]]), r.zintercard("{z}a", "{z}b"),
+      r.zintercard(["{z}a", "{z}b"], limit: 1), r.zintercard("{z}a", "{z}missing")
+    ]
+  end
+
+  conform "zunion, zinter and their store variants with aggregate count" do |r|
+    [
+      r.zadd("{z}a", [[1, "x"], [2, "y"]]), r.zadd("{z}b", [[10, "y"], [20, "z"]]), r.zadd("{z}c", [[5, "y"]]),
+      r.zunion("{z}a", "{z}b", "{z}c", aggregate: "count", with_scores: true), r.zinter("{z}a", "{z}b", aggregate: "COUNT", with_scores: true),
+      r.zunion("{z}a", "{z}b", weights: [2, 3], aggregate: "count", with_scores: true),
+      r.zunionstore("{z}u", ["{z}a", "{z}b", "{z}c"], aggregate: "count"), r.zinterstore("{z}i", ["{z}b", "{z}c"], aggregate: "count"),
+      r.zrange("{z}u", 0, -1, with_scores: true), r.zrange("{z}i", 0, -1, with_scores: true)
+    ]
+  end
+
+  conform "zrank and zrevrank with_score of a missing member" do |r|
+    [r.zadd("z", 1, "a"), r.zrank("z", "z", with_score: true), r.zrevrank("z", "z", withscore: true), r.zrank("missing", "a", with_score: true)]
+  end
 end

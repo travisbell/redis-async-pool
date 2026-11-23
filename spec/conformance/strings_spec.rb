@@ -60,4 +60,55 @@ RSpec.describe("Strings") do
   conform "binary and non-string values" do |r|
     [r.set("k", "\xFF\x00\xFE".b), r.get("k"), r.set("i", 42), r.get("i"), r.set("f", 1.5), r.get("f"), r.set("s", :sym), r.get("s")]
   end
+
+  conform "set with value and digest conditions" do |r|
+    digest = Redis::XXH3.hexdigest("v")
+    [
+      r.set("k", "v"), r.set("k", "w", ifeq: "x"), r.set("k", "w", ifeq: "v"), r.get("k"),
+      r.set("k", "x", ifne: "w"), r.set("k", "x", ifne: "v"), r.set("k", "v", ifeq: "x", get: true),
+      r.set("k", "y", ifdeq: "0000000000000000"), r.set("k", "y", ifdeq: digest), r.set("k", "z", ifdne: digest),
+      r.set("k", "z", ifdne: Redis::XXH3.hexdigest("z")), r.set("k", "w", ifdne: digest, ex: 100), r.ttl("k"), r.get("k"), r.set("missing", "v", ifeq: "v")
+    ]
+  end
+
+  conform "digest and delex" do |r|
+    [
+      r.set("k", "v"), r.digest("k"), r.digest("k") == Redis::XXH3.hexdigest("v"), r.digest("missing"),
+      r.delex("k", ifeq: "w"), r.delex("k", ifne: "v"), r.delex("k", ifdne: Redis::XXH3.hexdigest("v")),
+      r.delex("k", ifdeq: Redis::XXH3.hexdigest("v")), r.exists?("k"),
+      r.set("k", "v"), r.delex("k", ifne: "w"), r.set("k", "v"), r.delex("k", ifeq: "v"), r.set("k", "v"), r.delex("k"), r.delex("missing")
+    ]
+  end
+
+  conform "digest of a value that isn't a string", raises: true do |r|
+    [r.lpush("l", "x"), r.digest("l")]
+  end
+
+  conform "increx" do |r|
+    [
+      r.increx("n"), r.increx("n", by: 10), r.increx("n", by: 5, ubound: 12), r.increx("n", by: 5, ubound: 12, saturate: true),
+      r.increx("n", by: -20, lbound: 0), r.increx("n", by: -20, lbound: 0, saturate: true),
+      r.increx("f", by: 1.5), r.increx("f", by: 0.25, ubound: 1.6, saturate: true), r.increx("f", by: -3.0, lbound: -1),
+      r.increx("t", by: 1, ex: 100), r.ttl("t"), r.increx("t", px: 50_000, enx: true), r.ttl("t"),
+      r.increx("t", persist: true), r.ttl("t"), r.increx("t", exat: 4_000_000_000), r.expiretime("t"),
+      r.increx("t", pxat: 4_000_000_000_000), r.pexpiretime("t")
+    ]
+  end
+
+  conform "increx on a value that isn't a number", raises: true do |r|
+    [r.set("k", "x"), r.increx("k")]
+  end
+
+  conform "lcs" do |r|
+    [
+      r.mset("{l}a", "ohmytext", "{l}b", "mynewtext"),
+      r.lcs("{l}a", "{l}b"), r.lcs("{l}a", "{l}b", len: true), r.lcs("{l}a", "{l}b", idx: true),
+      r.lcs("{l}a", "{l}b", idx: true, minmatchlen: 4, withmatchlen: true), r.lcs("{l}a", "{l}b", idx: true, withmatchlen: true),
+      r.lcs("{l}a", "{l}missing"), r.lcs("{l}a", "{l}missing", len: true)
+    ]
+  end
+
+  conform "lcs across slots" do |r|
+    [r.set("a", "x"), r.lcs("a", "b")]
+  end
 end

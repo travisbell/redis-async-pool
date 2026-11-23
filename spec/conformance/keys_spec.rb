@@ -72,6 +72,55 @@ RSpec.describe("Keys") do
     ]
   end
 
+  conform "sort_ro" do |r|
+    [
+      r.rpush("{s}l", ["3", "1", "2"]), r.sort_ro("{s}l"), r.sort_ro("{s}l", order: "desc", limit: [0, 2]),
+      r.rpush("{s}w", ["b", "a"]), r.sort_ro("{s}w", order: "alpha"),
+      r.set("{s}w_1", "3"), r.set("{s}w_2", "1"), r.set("{s}w_3", "2"), r.set("{s}n_1", "one"),
+      r.sort_ro("{s}l", by: "{s}w_*", get: ["#", "{s}n_*"]), r.sort_ro("{s}l", by: "{s}w_*", get: "{s}n_*"), r.sort_ro("{s}missing")
+    ]
+  end
+
+  conform "bless_get, bless_set and bless_clear" do |r|
+    [
+      r.set("k", "v"), r.bless_get("k"), r.bless_set("k", "NO-EVICT"), r.bless_set("k", "NO-EVICT"), r.bless_get("k"),
+      r.bless_clear("k", "NO-EVICT"), r.bless_clear("k", "NO-EVICT"), r.bless_get("k")
+    ]
+  end
+
+  conform "bless on a missing key", raises: true do |r|
+    r.bless_set("missing", "NO-EVICT")
+  end
+
+  conform "bless with an unknown flag", raises: true do |r|
+    [r.set("k", "v"), r.bless_set("k", "BOGUS")]
+  end
+
+  conform "bless_scan", targets: [:standalone] do |r|
+    [r.set("a", "1"), r.set("b", "2"), r.set("c", "3"), r.bless_set("a", "NO-EVICT"), r.bless_set("b", "NO-EVICT"), r.bless_scan(0, "NO-EVICT"), r.bless_scan(0, "NO-EVICT", count: 1)]
+  end
+
+  conform "bless_scan_each", targets: [:standalone], modes: [:direct] do |r|
+    r.set("a", "1")
+    r.set("b", "2")
+    r.bless_set("a", "NO-EVICT")
+    [r.bless_scan_each("NO-EVICT").to_a, r.bless_scan_each("NO-EVICT", count: 1).to_a]
+  end
+
+  # Like scan, a cluster bless_scan walks every node, one per call, encoding the node in the cursor.
+  conform "bless_scan on a cluster", targets: [:cluster], modes: [:direct] do |r|
+    keys = ["a", "b", "c", "d", "e"]
+    keys.each { |key| r.set(key, "1") && r.bless_set(key, "NO-EVICT") }
+    cursor = 0
+    found = []
+    loop do
+      cursor, batch = r.bless_scan(cursor, "NO-EVICT", count: 100)
+      found.concat(batch)
+      break if cursor == "0"
+    end
+    [found.sort, r.bless_scan_each("NO-EVICT").to_a.sort]
+  end
+
   conform "scan", targets: [:standalone] do |r|
     [r.set("a", "1"), r.set("b", "2"), r.lpush("l", "x"), r.scan(0), r.scan(0, match: "a*", count: 100), r.scan(0, type: "list")]
   end

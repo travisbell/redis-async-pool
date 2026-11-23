@@ -49,6 +49,50 @@ RSpec.describe(Redis::Async::Pool::Client) do
         expect(connection).to(have_received(:close).at_least(:once))
         expect(redis.get("k")).to(be_nil)
       end
+
+      it "dups with its pool and redis-rb's overrides, as keyspace notifications do" do
+        redis = client(size: 2)
+        copy = redis.dup(db: 1)
+        expect([copy.class, copy.connection[:db], copy.instance_variable_get(:@pool_options)]).to(eq([described_class, 1, redis.instance_variable_get(:@pool_options)]))
+        copy.close
+
+        server = Conformance.servers(:standalone).first
+        server.config(:set, "notify-keyspace-events", "KA")
+        events = Thread::Queue.new
+        notifications = redis.keyspace_notifications
+        notifications.subscribe_keyspace("k") { |notification| events << [notification.key, notification.event] }
+        redis.set("k", "v")
+
+        expect(events.pop(timeout: 5)).to(eq(["k", "set"]))
+      ensure
+        notifications&.close
+        server&.config(:set, "notify-keyspace-events", "")
+      end
     end
+  end
+end
+
+RSpec.describe(Redis::Async::Pool::ClusterClient) do
+  before { Conformance.reset!(:cluster) }
+  after { Conformance.servers(:cluster).each(&:flushall) }
+
+  def calls(command)
+    Conformance.servers(:cluster).map { |server| server.info("commandstats").dig(command, "calls").to_i }
+  end
+
+  it "routes commands as redis-clustering does, under the caller's command_routings" do
+    redis = described_class.new(
+      nodes: [Conformance::URLS[:cluster]],
+      command_routings: { dbsize: { request_policy: "all_shards", response_policy: "agg_sum" } }
+    )
+
+    Sync do
+      ["a", "b", "c"].each { |key| redis.set(key, "1") }
+      expect(redis.waitaof(0, 0, 100)).to(eq([0, 0]))
+      expect(calls("waitaof")).to(eq([1, 1, 1]))
+      expect(redis.dbsize).to(eq(3))
+    end
+  ensure
+    redis&.close
   end
 end
