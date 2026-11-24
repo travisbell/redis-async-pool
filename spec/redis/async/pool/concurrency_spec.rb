@@ -325,4 +325,103 @@ RSpec.describe("Clients shared across fibers") do
       expect(Sync { redis.set("k", "v") }).to(eq("OK"))
     end
   end
+
+  describe "auto-pipelining on a cluster" do
+    # The size of each pipeline sent to a node, as redis-client's middlewares see them.
+    let(:sizes) { [] }
+    let(:recorder) do
+      sizes = self.sizes
+      Module.new do
+        define_method(:call_pipelined) do |commands, config, &block|
+          sizes << commands.size unless commands.any? { |command| command.first.casecmp?("hello") }
+          super(commands, config, &block)
+        end
+      end
+    end
+    let(:redis) { Redis::Async::Pool::ClusterClient.new(nodes: [Conformance::URLS[:cluster]], middlewares: [recorder], pool: { size: 1, timeout: 5 }) }
+    let(:servers) { Conformance.servers(:cluster) }
+
+    before { Conformance.reset!(:cluster) }
+
+    after do
+      redis.close
+      servers.each(&:flushall)
+    end
+
+    def concurrently(count)
+      Sync do
+        barrier = Async::Barrier.new
+        tasks = Array.new(count) { |i| barrier.async { yield(i) } }
+        barrier.wait
+        tasks.map(&:wait)
+      end
+    end
+
+    def node_of(slot)
+      owner = servers.first.call("CLUSTER", "SLOTS").find { |first, last| (first..last).cover?(slot) }
+      servers.find { |server| server.connection[:port] == owner[2][1] }
+    end
+
+    # Moves a slot as redis-cli --cluster reshard does: keys: moves only those keys, leaving the slot migrating.
+    def move_slot(slot, from, to, keys: nil)
+      to_id = to.call("CLUSTER", "MYID")
+      to.call("CLUSTER", "SETSLOT", slot, "IMPORTING", from.call("CLUSTER", "MYID"))
+      from.call("CLUSTER", "SETSLOT", slot, "MIGRATING", to_id)
+      (keys || from.call("CLUSTER", "GETKEYSINSLOT", slot, 1000)).each do |key|
+        from.call("MIGRATE", "127.0.0.1", to.connection[:port], key, 0, 5000)
+      end
+      return if keys
+
+      [to, from, *(servers - [to, from])].each { |server| server.call("CLUSTER", "SETSLOT", slot, "NODE", to_id) }
+    end
+
+    it "sends the nodes' shares of fibers' pipelines and mgets together, giving each fiber its replies" do
+      results = concurrently(40) do |i|
+        keys = Array.new(6) { |k| "f#{i}:#{k}" }
+        redis.mset(*keys.flat_map { |key| [key, "#{key}!"] })
+        [redis.mget(*keys), redis.pipelined { |p| [p.get(keys[0]), p.incr("n#{i}"), p.get(keys[5])] }, redis.del(*keys)]
+      end
+
+      expect(results).to(eq(Array.new(40) { |i| [Array.new(6) { |k| "f#{i}:#{k}!" }, ["f#{i}:0!", 1, "f#{i}:5!"], 6] }))
+      expect(sizes.max).to(be > 6)
+    end
+
+    it "raises or returns a pipeline's errors as redis-rb does" do
+      outcome = lambda do |client, i|
+        client.pipelined(exception: i.even?) { |p| [p.set("s#{i}", "x"), p.incr("s#{i}"), p.get("t#{i}"), p.incr("u#{i}")] }
+          .map { |reply| reply.is_a?(StandardError) ? [reply.class, reply.message] : reply }
+      rescue Redis::BaseError => error
+        [error.class, error.message.gsub(/127\.0\.0\.1:\d+/, "node")]
+      end
+
+      results = concurrently(20) { |i| outcome.call(redis, i) }
+      servers.each(&:flushall)
+      reference = Redis::Cluster.new(nodes: [Conformance::URLS[:cluster]])
+
+      expect(results).to(eq(Array.new(20) { |i| outcome.call(reference, i) }))
+      expect(sizes.max).to(be > 4)
+    ensure
+      reference&.close
+    end
+
+    it "follows MOVED and ASK redirections in the nodes' shares" do
+      slot = servers.first.call("CLUSTER", "KEYSLOT", "{m}")
+      from = node_of(slot)
+      to = (servers - [from]).first
+      read = ->(i) { redis.mget("o#{i}", "{m}a", "{m}b") }
+
+      Sync { [redis.mset("{m}a", "1", "{m}b", "2"), (0...30).map { |i| redis.set("o#{i}", i.to_s) }] }
+
+      # The client's slot map is now stale: the slot's node answers MOVED.
+      move_slot(slot, from, to)
+      expect(concurrently(30) { |i| read.call(i) }).to(eq(Array.new(30) { |i| [i.to_s, "1", "2"] }))
+
+      # Halfway through moving it back, the slot's node answers ASK for the key that has moved.
+      move_slot(slot, to, from, keys: ["{m}a"])
+      expect(concurrently(30) { |i| read.call(i) }).to(eq(Array.new(30) { |i| [i.to_s, "1", "2"] }))
+      expect(sizes.max).to(be > 3)
+    ensure
+      move_slot(slot, to, from) if to
+    end
+  end
 end

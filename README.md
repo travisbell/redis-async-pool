@@ -73,6 +73,11 @@ become one. Commands that change or block the connection they run on (`multi`, `
 `hello`, `client`, `reset`, `wait`, `waitaof`, subscriptions, blocking pops, `xread`, ...) always go
 alone.
 
+On a cluster, each node's share of a `pipelined` block, or of a command split across nodes (`mget`,
+`mset`, `del`, ...), queues the same way, alongside single commands, and comes back to redis-cluster-client
+as if it had gone alone: it follows MOVED and ASK redirections in it as usual. A share with a blocking
+command, or a command that mustn't be retried, goes alone.
+
 What a batched command does differently:
 
 - redis-client middlewares (e.g. instrumentation) see one `call_pipelined` with every fiber's commands,
@@ -91,7 +96,9 @@ What a batched command does differently:
   redis-client connection, or redis-cluster-client without pools) with a pooled one, and the lock around it.
 - `pool: { async: true }` makes redis-client's `RedisClient::Pooled` (which redis-cluster-client also
   uses for each node) build its pool with `Connections`: async-pool's `Async::Pool::Controller` behind
-  connection_pool's interface, which also auto-pipelines the single commands `RedisClient::Pooled` sends.
+  connection_pool's interface, which also auto-pipelines the single commands `RedisClient::Pooled` sends,
+  and (through `ClusterPipelining`, prepended to redis-cluster-client's pipeline) a cluster node's share of
+  a pipeline.
 - `concurrency: { model: :async }` makes redis-cluster-client use `FiberWorker`.
 
 Both are hooks prepended to redis-client and redis-cluster-client on load, inert unless a client asks for
@@ -132,8 +139,9 @@ next to Redis, with 4 connections (operations per second, and CPU per operation)
 | standalone `get` | 47k vs 45k | 270k vs 37k (3.1 vs 27 µs) | 345k vs 13k (2.5 vs 79 µs) |
 | standalone `hgetall` | 37k vs 36k | 108k vs 31k | 127k vs 12k |
 | cluster `get` | 48k vs 46k | 172k vs 31k (5.8 vs 32 µs) | 245k vs 11k |
-| cluster `mget` (10 keys across nodes) | 10.0k vs 7.1k | 11.2k vs 9.0k | 7.6k vs 3.5k |
-| cluster `fanout` (5 fibers' GETs) | 7.6k vs 6.8k | 15.2k vs 4.4k | 14.3k vs 1.7k |
+| cluster `mget` (10 keys across nodes) | 9.5k vs 7.2k | 20.6k vs 9.3k (48 vs 107 µs) | 21.0k vs 3.6k |
+| cluster `pipelined` (10 GETs across nodes) | 8.7k vs 7.1k | 17.3k vs 8.5k | 16.3k vs 3.4k |
+| cluster `fanout` (5 fibers' GETs) | 7.6k vs 7.1k | 15.7k vs 4.5k | 14.7k vs 1.9k |
 
 With one fiber it's within noise of redis-rb, and on a cluster its fan-out cuts the latency of commands
 across nodes by about a quarter. Under concurrency, auto-pipelining turns the round trips of many fibers' commands into one,

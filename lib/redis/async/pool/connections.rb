@@ -47,10 +47,10 @@ class Redis
           blpop brpop brpoplpush blmove blmpop blmovem bzpopmin bzpopmax bzmpop bzmove xread xreadgroup
         ].flat_map { |name| [name, name.upcase, name.to_sym, name.upcase.to_sym] }.to_h { |name| [name, true] }.freeze
 
-        # A command waiting to go out in a pipeline. It's also what wakes its fiber, from the scheduler's ready queue:
-        # only while the fiber waits for it (it's parked), so a wakeup the fiber no longer needs (e.g. it was stopped
-        # first) can't resume it from whatever it waits for next.
-        Request = Struct.new(:command, :fiber, :deadline, :value, :error, :done, :lead, :parked) do
+        # A command (or, if pipeline is set, a pipeline's commands) waiting to go out in a pipeline. It's also what
+        # wakes its fiber, from the scheduler's ready queue: only while the fiber waits for it (it's parked), so a
+        # wakeup the fiber no longer needs (e.g. it was stopped first) can't resume it from whatever it waits for next.
+        Request = Struct.new(:command, :fiber, :deadline, :value, :error, :done, :lead, :parked, :pipeline) do
           def alive?
             parked
           end
@@ -109,6 +109,26 @@ class Redis
 
               block ? yield(request.value) : request.value
             end
+          end
+        end
+
+        # Sends a pipeline's commands (e.g. a cluster node's share of a pipeline or an mget) with the other fibers'
+        # commands that found every connection busy, as #call_v does, returning their replies (with their errors
+        # among them, as RedisClient#pipelined(exception: false) would). Returns nil, and sends nothing, if a
+        # connection is free: the caller sends them as it would have.
+        def call_pipelined(commands, owner)
+          return if Thread.current[@held_key] || (@pending.empty? && free?)
+
+          Sync do |task|
+            request = Request.new(commands, Fiber.current, monotonic + @timeout)
+            request.pipeline = true
+            request.lead = @pending.empty?
+            @pending << request
+            send_in_pipeline(request, task, owner)
+
+            raise request.error if request.error
+
+            request.value
           end
         end
 
@@ -232,33 +252,35 @@ class Redis
         def send_pipeline(resource, batch, owner)
           Thread.current[@held_key] = resource
           client = prepare(resource.client, owner)
-          if batch.size == 1
-            sent = batch
-            results = [call(client, batch.first.command)]
+          # Each request with how many commands it put in the pipeline, whose replies are its.
+          sent = []
+          results = if batch.size == 1 && !batch.first.pipeline
+            sent << [batch.first, 1]
+            [call(client, batch.first.command)]
           else
-            sent = []
-            results = client.pipelined(exception: false) do |pipeline|
-              batch.each do |request|
-                pipeline.call_v(request.command)
-                sent << request
-              rescue StandardError => error
-                # An invalid argument fails its own command, as RedisClient#call_v would, which stays out of the pipeline.
-                request.error = error
-                finish(request)
-              end
+            client.pipelined(exception: false) do |pipeline|
+              batch.each { |request| sent << [request, add(pipeline, request)] }
             end
           end
 
-          sent.each_with_index do |request, index|
-            result = results[index]
-            if result.is_a?(::RedisClient::Error)
-              # Its next error would be another fiber's.
-              result._set_next_error(nil)
-              request.error = result
-            else
-              request.value = result
+          offset = 0
+          sent.each do |request, count|
+            unless request.done
+              if request.pipeline
+                request.value = results[offset, count]
+              else
+                result = results[offset]
+                if result.is_a?(::RedisClient::Error)
+                  # Its next error would be another fiber's.
+                  result._set_next_error(nil)
+                  request.error = result
+                else
+                  request.value = result
+                end
+              end
+              finish(request)
             end
-            finish(request)
+            offset += count
           end
         rescue Exception => error
           # The connection's (or e.g. a middleware's) error, or, if the pipeline's task was stopped (with its reactor),
@@ -274,6 +296,26 @@ class Redis
           raise if batch.size == 1 || !error.is_a?(StandardError)
         ensure
           Thread.current[@held_key] = nil
+        end
+
+        # Adds a request's commands to the pipeline, returning how many it added. An invalid argument fails its own
+        # request, as RedisClient#call_v (or #pipelined) would.
+        def add(pipeline, request)
+          added = 0
+          if request.pipeline
+            request.command.each do |command|
+              pipeline.call_v(command)
+              added += 1
+            end
+          else
+            pipeline.call_v(request.command)
+            added = 1
+          end
+          added
+        rescue StandardError => error
+          request.error = error
+          finish(request)
+          added
         end
 
         # A batch of one goes out as the single command it is, as middlewares would otherwise see a pipeline of one.
@@ -300,7 +342,8 @@ class Redis
 
       # Builds redis-client's pools with Connections when their options say async: true (and connection_pool's
       # otherwise, without the options it doesn't know).
-      # Its single commands go through Connections#call_v, which pipelines them when connections are busy.
+      # Its single commands go through Connections#call_v, which pipelines them when connections are busy, as
+      # ClusterPipelining sends pipelines' commands through #auto_pipelined.
       module AsyncPooled
         def call_v(command, &block)
           pool = self.pool
@@ -308,6 +351,19 @@ class Redis
 
           begin
             pool.call_v(command, self, &block)
+          rescue ::ConnectionPool::TimeoutError => error
+            raise ::RedisClient::CheckoutTimeoutError, "Couldn't checkout a connection in time: #{error.message}"
+          end
+        end
+
+        # The replies to a pipeline's commands, sent with other fibers' if every connection is busy (see
+        # Connections#call_pipelined), or nil: if a connection is free, or a command can't share a pipeline.
+        def auto_pipelined(commands)
+          pool = self.pool
+          return unless pool.is_a?(Connections) && commands.all? { |command| pool.pipelines?(command) }
+
+          begin
+            pool.call_pipelined(commands, self)
           rescue ::ConnectionPool::TimeoutError => error
             raise ::RedisClient::CheckoutTimeoutError, "Couldn't checkout a connection in time: #{error.message}"
           end

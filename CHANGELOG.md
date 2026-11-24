@@ -24,6 +24,9 @@
   find every connection busy go out together, one pipeline per connection, each fiber getting its own reply. In a
   Linux container with 4 connections and 64–256 fibers, 3–30× the operations per second of redis-rb in a
   `ConnectionPool::Wrapper`, at 2–9 µs of CPU per command.
+- On a cluster, auto-pipelining also takes in each node's share of a pipeline, or of a command split across nodes
+  (`mget`, `mset`, `del`, ...): with 64–256 fibers, about twice the `mget`s and pipelines per second, for half the
+  CPU and a tenth of the p99 latency.
 - A checkout no longer takes a timeout around the caller's code (e.g. `task.with_timeout`) for its own, which
   raised `Redis::ConnectionError` instead of the caller's `Async::TimeoutError`, and doesn't time taking a
   connection the pool has room to open.

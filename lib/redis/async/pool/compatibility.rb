@@ -48,6 +48,20 @@ class Redis
             end
             missing << "Async::Task#run" unless ::Async::Task.method_defined?(:run)
 
+            # ClusterPipelining replaces how redis-cluster-client sends a node's share of a pipeline, and raises what
+            # its RedisClient::ConnectionMixin#call_pipelined_aware_of_redirection would.
+            cluster_pipeline = ::RedisClient::Cluster::Pipeline
+            missing << "RedisClient::Cluster::Pipeline#do_pipelining" unless cluster_pipeline.private_method_defined?(:do_pipelining)
+            [:_commands, :_timeouts, :_retryable?, :_coerce!].each do |method|
+              missing << "RedisClient::Cluster::Pipeline::Extended##{method}" unless cluster_pipeline::Extended.method_defined?(method)
+            end
+            { RedirectionNeeded: [:replies=, :indices=, :first_exception=], StaleClusterState: [:replies=, :first_exception=] }.each do |name, writers|
+              error = cluster_pipeline.const_get(name) if cluster_pipeline.const_defined?(name, false)
+              writers.each do |writer|
+                missing << "RedisClient::Cluster::Pipeline::#{name}##{writer}" unless error&.method_defined?(writer)
+              end
+            end
+
             # ClusterClient passes pool: and concurrency: through the config to RedisClient::Cluster.
             missing << "RedisClient::ClusterConfig#new_client" unless ::RedisClient::ClusterConfig.method_defined?(:new_client)
             missing << "RedisClient::Cluster.new(pool:, concurrency:)" unless keywords?(::RedisClient::Cluster.instance_method(:initialize), :pool, :concurrency)

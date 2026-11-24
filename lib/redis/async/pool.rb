@@ -41,7 +41,9 @@ require_relative "pool/fiber_worker"
 require_relative "pool/pooled"
 require_relative "pool/client"
 require_relative "pool/cluster_client"
+require_relative "pool/cluster_pipelining"
 
-# Both only take effect when asked for: pool: { async: true } and concurrency: { model: :async }.
+# They only take effect when asked for: pool: { async: true } (with auto_pipeline: true) and concurrency: { model: :async }.
 RedisClient::Pooled.prepend(Redis::Async::Pool::AsyncPooled)
+RedisClient::Cluster::Pipeline.prepend(Redis::Async::Pool::ClusterPipelining)
 RedisClient::Cluster::ConcurrentWorker.singleton_class.prepend(Redis::Async::Pool::ConcurrentWorkerModels)
